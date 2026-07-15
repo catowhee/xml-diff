@@ -2,6 +2,7 @@ import gzip
 import io
 import os
 import re
+import tempfile
 import zipfile
 from datetime import datetime
 from urllib.request import urlopen
@@ -279,8 +280,9 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
             diff = int((~eq).sum())
             if diff == 0:
                 continue
+            prefixed_col = f"{level}.{col}"
             col_stat_rows.append({
-                "column": col,
+                "column": prefixed_col,
                 "same": same,
                 "diff": diff,
                 "diff%": round(diff / found * 100, 1),
@@ -291,7 +293,7 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
                 diff_rows_for_col = diff_rows_for_col.head(diff_limit)
             for _, r in diff_rows_for_col.iterrows():
                 diff_rows.append({
-                    "column": col,
+                    "column": prefixed_col,
                     "product-id": r["product-id"],
                     "comestri-value": r[sub_col],
                     "sftp-value": r[sftp_col],
@@ -303,7 +305,13 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
         })
 
     df_missing = df_submitted[df_submitted["product-id"].isin(missing_ids)][["product-id", "product-level"]].copy()
-    return sections, pd.DataFrame(diff_rows), df_missing
+
+    all_col_stats = pd.concat(
+        [sec["col_stats"] for sec in sections if sec["col_stats"] is not None],
+        ignore_index=True,
+    ) if any(sec["col_stats"] is not None for sec in sections) else pd.DataFrame()
+
+    return sections, pd.DataFrame(diff_rows), df_missing, all_col_stats
 
 
 def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path):
@@ -430,17 +438,8 @@ def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path):
 
 DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
 SFTP_REPORT_DIR = "/incoming/diff_reports"
+SFTP_SHEET_DATA_DIR = "/incoming/diff_reports/google_sheet_data"
 
-
-def upload_to_sftp(local_path, remote_filename):
-    transport = paramiko.Transport((os.environ["SFTP_HOST"], int(os.environ.get("SFTP_PORT", 22))))
-    transport.connect(username=os.environ["SFTP_USERNAME"], password=os.environ["SFTP_PASSWORD"])
-    sftp = paramiko.SFTPClient.from_transport(transport)
-    try:
-        sftp.put(local_path, f"{SFTP_REPORT_DIR}/{remote_filename}")
-    finally:
-        sftp.close()
-        transport.close()
 
 
 def main():
@@ -482,16 +481,42 @@ def main():
 
     # Generate and write workbook
     print("\nGenerating report ...")
-    sections, df_diffs, df_missing = generate_report(df_submitted, df_sftp, zip_path, diff_limit)
+    sections, df_diffs, df_missing, df_col_stats = generate_report(df_submitted, df_sftp, zip_path, diff_limit)
     write_excel(sections, df_diffs, df_missing, zip_path, wb_path)
 
+    col_stats_filename = f"column_stats_{timestamp}.csv"
+    diff_details_filename = f"diff_details_{timestamp}.csv"
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        df_col_stats.to_csv(tmp.name, index=False)
+        col_stats_tmp = tmp.name
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        df_diffs.to_csv(tmp.name, index=False)
+        diff_details_tmp = tmp.name
+
     # Upload to SFTP
-    print(f"Uploading report to SFTP {SFTP_REPORT_DIR} ...")
-    try:
-        upload_to_sftp(wb_path, report_filename)
-        print("  Upload complete.")
-    except Exception as e:
-        print(f"  [error] Upload failed: {e}")
+    uploads = [
+        (wb_path, SFTP_REPORT_DIR, report_filename),
+        (col_stats_tmp, SFTP_SHEET_DATA_DIR, col_stats_filename),
+        (diff_details_tmp, SFTP_SHEET_DATA_DIR, diff_details_filename),
+    ]
+    print(f"\nUploading to SFTP ...")
+    for local_path, remote_dir, filename in uploads:
+        remote_path_full = f"{remote_dir}/{filename}"
+        try:
+            transport = paramiko.Transport((os.environ["SFTP_HOST"], int(os.environ.get("SFTP_PORT", 22))))
+            transport.connect(username=os.environ["SFTP_USERNAME"], password=os.environ["SFTP_PASSWORD"])
+            sftp = paramiko.SFTPClient.from_transport(transport)
+            sftp.put(local_path, remote_path_full)
+            sftp.close()
+            transport.close()
+            print(f"  {remote_path_full}")
+        except Exception as e:
+            print(f"  [error] {remote_path_full}: {e}")
+
+    os.unlink(col_stats_tmp)
+    os.unlink(diff_details_tmp)
 
     # Print summary to terminal
     for sec in sections:
@@ -501,10 +526,12 @@ def main():
         if sec["col_stats"] is not None and not sec["col_stats"].empty:
             print(f"  {len(sec['col_stats'])} column(s) with differences")
 
-    print(f"\nWorkbook → {wb_path}")
+    print(f"\nWorkbook       → {wb_path}")
     print(f"  Tab 1: Report")
     print(f"  Tab 2: Diff Details ({len(df_diffs)} rows)")
     print(f"  Tab 3: Missing Products ({len(df_missing)} products)")
+    print(f"Column stats   → {SFTP_SHEET_DATA_DIR}/{col_stats_filename} ({len(df_col_stats)} rows)")
+    print(f"Diff details   → {SFTP_SHEET_DATA_DIR}/{diff_details_filename} ({len(df_diffs)} rows)")
 
 
 if __name__ == "__main__":
