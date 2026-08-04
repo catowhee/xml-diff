@@ -11,6 +11,7 @@ import paramiko
 import pandas as pd
 from dotenv import load_dotenv
 from lxml import etree
+from lxml import html as lhtml
 
 load_dotenv()
 
@@ -114,6 +115,42 @@ def clean_long_description(text):
     return text or None
 
 
+_PROD_DESC_MARKER = '<div class="col-5">Product Description:</div>'
+
+
+def strip_product_description_div(text):
+    """Remove the 'Product Description:' label div and the div immediately
+    following it (its content block)."""
+    if not text or _PROD_DESC_MARKER not in text:
+        return text
+    try:
+        wrapper = lhtml.fragment_fromstring(f"<div>{text}</div>")
+    except Exception:
+        return text
+
+    label_div = next(
+        (
+            d for d in wrapper.findall(".//div[@class='col-5']")
+            if (d.text or "").strip() == "Product Description:"
+        ),
+        None,
+    )
+    if label_div is None:
+        return text
+
+    next_div = label_div.getnext()
+    while next_div is not None and next_div.tag != "div":
+        next_div = next_div.getnext()
+
+    parent = label_div.getparent()
+    if next_div is not None:
+        parent.remove(next_div)
+    parent.remove(label_div)
+
+    serialized = lhtml.tostring(wrapper, encoding="unicode")
+    return serialized[len("<div>"):-len("</div>")]
+
+
 _SKU_RE = re.compile(r"^\d{13,}-")
 
 
@@ -156,6 +193,9 @@ def extract_product(el, product_id):
             value = child.text
             if field == "long-description":
                 value = clean_long_description(value)
+                derived_field = f"{field}-no-prod-desc"
+                derived_col = f"{derived_field}.{site_id}" if site_id else derived_field
+                row[derived_col] = clean_long_description(strip_product_description_div(value))
             row[col] = value
 
     custom_attrs = el.find(CUSTOM_ATTRS_TAG)
