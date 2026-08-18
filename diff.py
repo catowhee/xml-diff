@@ -115,13 +115,11 @@ def clean_long_description(text):
     return text or None
 
 
-_PROD_DESC_MARKER = '<div class="col-5">Product Description:</div>'
-
-
-def strip_product_description_div(text):
-    """Remove the 'Product Description:' label div and the div immediately
-    following it (its content block)."""
-    if not text or _PROD_DESC_MARKER not in text:
+def _strip_labelled_div(text, label):
+    """Remove the 'col-5' div whose text matches `label`, plus the div
+    immediately following it (its content block)."""
+    marker = f'<div class="col-5">{label}</div>'
+    if not text or marker not in text:
         return text
     try:
         wrapper = lhtml.fragment_fromstring(f"<div>{text}</div>")
@@ -131,7 +129,7 @@ def strip_product_description_div(text):
     label_div = next(
         (
             d for d in wrapper.findall(".//div[@class='col-5']")
-            if (d.text or "").strip() == "Product Description:"
+            if (d.text or "").strip() == label
         ),
         None,
     )
@@ -149,6 +147,14 @@ def strip_product_description_div(text):
 
     serialized = lhtml.tostring(wrapper, encoding="unicode")
     return serialized[len("<div>"):-len("</div>")]
+
+
+def strip_product_description_div(text):
+    return _strip_labelled_div(text, "Product Description:")
+
+
+def strip_product_name_div(text):
+    return _strip_labelled_div(text, "Product:")
 
 
 _SKU_RE = re.compile(r"^\d{13,}-")
@@ -193,9 +199,17 @@ def extract_product(el, product_id):
             value = child.text
             if field == "long-description":
                 value = clean_long_description(value)
-                derived_field = f"{field}-no-prod-desc"
-                derived_col = f"{derived_field}.{site_id}" if site_id else derived_field
-                row[derived_col] = clean_long_description(strip_product_description_div(value))
+
+                no_prod_desc_field = f"{field}-no-prod-desc"
+                no_prod_desc_col = f"{no_prod_desc_field}.{site_id}" if site_id else no_prod_desc_field
+                row[no_prod_desc_col] = clean_long_description(strip_product_description_div(value))
+
+                no_prod_desc_no_prod_name_field = f"{field}-no-prod-desc-no-prod-name"
+                no_prod_desc_no_prod_name_col = (
+                    f"{no_prod_desc_no_prod_name_field}.{site_id}" if site_id else no_prod_desc_no_prod_name_field
+                )
+                both_stripped = strip_product_name_div(strip_product_description_div(value))
+                row[no_prod_desc_no_prod_name_col] = clean_long_description(both_stripped)
             row[col] = value
 
     custom_attrs = el.find(CUSTOM_ATTRS_TAG)
