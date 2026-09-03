@@ -106,12 +106,15 @@ def fetch_schema(buf):
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
+_WS = r"[ \t\r\n\f\v]"   # deliberately excludes \xa0 (non-breaking space), which we want to keep
+
+
 def clean_long_description(text):
     if not text:
         return text
     text = _HTML_COMMENT.sub("", text)
-    text = re.sub(r">\s+<", "><", text)   # whitespace between tags
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(rf">{_WS}+<", "><", text)   # whitespace between tags
+    text = re.sub(rf"{_WS}+", " ", text).strip(" \t\r\n\f\v")
     return text or None
 
 
@@ -145,7 +148,7 @@ def _strip_labelled_div(text, label):
         parent.remove(next_div)
     parent.remove(label_div)
 
-    serialized = lhtml.tostring(wrapper, encoding="unicode")
+    serialized = lhtml.tostring(wrapper, encoding="unicode").replace("\xa0", "&nbsp;")
     return serialized[len("<div>"):-len("</div>")]
 
 
