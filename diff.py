@@ -290,10 +290,43 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
     """
     sftp_ids = set(df_sftp["product-id"])
 
+    def _levels_with_data(df, col):
+        """Levels (e.g. 'style-colour') for which `col` has at least one non-null value."""
+        has_value = df[col].notna()
+        return sorted(df.loc[has_value, "product-level"].unique())
+
+    excluded_cols = ("product-id", "product-level")
     shared_cols = [
         c for c in df_submitted.columns
-        if c in df_sftp.columns and c not in ("product-id", "product-level")
+        if c in df_sftp.columns and c not in excluded_cols
     ]
+
+    submitted_only_cols = []
+    submitted_only_value_rows = []
+    for c in df_submitted.columns:
+        if c in df_sftp.columns or c in excluded_cols:
+            continue
+        levels = _levels_with_data(df_submitted, c)
+        if not levels:
+            submitted_only_cols.append(c)
+            continue
+        for level in levels:
+            prefixed = f"{level}.{c}"
+            submitted_only_cols.append(prefixed)
+            values = df_submitted.loc[df_submitted["product-level"] == level, c].dropna()
+            if diff_limit is not None:
+                values = values.head(diff_limit)
+            for value in values:
+                submitted_only_value_rows.append({"column": prefixed, "value": value})
+    submitted_only_cols.sort()
+
+    sftp_only_cols = sorted(
+        prefixed
+        for c in df_sftp.columns if c not in df_submitted.columns and c not in excluded_cols
+        for prefixed in (
+            [f"{level}.{c}" for level in _levels_with_data(df_sftp, c)] or [c]
+        )
+    )
 
     sections = []
     diff_rows = []
@@ -368,10 +401,16 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
         ignore_index=True,
     ) if any(sec["col_stats"] is not None for sec in sections) else pd.DataFrame()
 
-    return sections, pd.DataFrame(diff_rows), df_missing, all_col_stats
+    df_submitted_only_values = pd.DataFrame(submitted_only_value_rows, columns=["column", "value"])
+
+    return (
+        sections, pd.DataFrame(diff_rows), df_missing, all_col_stats,
+        submitted_only_cols, sftp_only_cols, df_submitted_only_values,
+    )
 
 
-def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path):
+def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path, submitted_only_cols, sftp_only_cols,
+                 df_submitted_only_values):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
@@ -454,6 +493,26 @@ def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path):
             row += 1
         row += 1
 
+    # Columns only present in one source (never compared, so never show up above)
+    ws.cell(row=row, column=1,
+            value="COLUMNS ONLY IN ONE SOURCE (not compared above)").font = BOLD
+    row += 1
+    write_row(ws, row, ["Column", "Only in"], font=WHITE_FONT, fill=HEADER_FILL)
+    row += 1
+    only_in_rows = (
+        [(c, "Comestri export") for c in submitted_only_cols]
+        + [(c, "SFTP") for c in sftp_only_cols]
+    )
+    if not only_in_rows:
+        ws.cell(row=row, column=1, value="None — every column exists in both sources.")
+        row += 1
+    else:
+        for i, (col, source) in enumerate(only_in_rows):
+            fill = ALT_FILL if i % 2 == 0 else None
+            write_row(ws, row, [col, source], fill=fill)
+            row += 1
+    row += 1
+
     # Column widths
     ws.column_dimensions["A"].width = 55
     for col in ["B", "C", "D"]:
@@ -484,6 +543,18 @@ def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path):
             write_row(ws3, i, list(r), fill=fill)
         for col_idx, _ in enumerate(df_missing.columns, 1):
             ws3.column_dimensions[get_column_letter(col_idx)].width = 20
+
+    # ── Tab 4: Comestri-Only Values ─────────────────────────────────
+    ws4 = wb.create_sheet("Comestri-Only Values")
+    if df_submitted_only_values.empty:
+        ws4.cell(row=1, column=1, value="No columns found only in the Comestri export.")
+    else:
+        write_row(ws4, 1, list(df_submitted_only_values.columns), font=WHITE_FONT, fill=HEADER_FILL)
+        for i, (_, r) in enumerate(df_submitted_only_values.iterrows(), 2):
+            fill = ALT_FILL if i % 2 == 0 else None
+            write_row(ws4, i, list(r), fill=fill)
+        ws4.column_dimensions["A"].width = 55
+        ws4.column_dimensions["B"].width = 40
 
     wb.save(wb_path)
 
@@ -538,11 +609,22 @@ def main():
 
     # Generate and write workbook
     print("\nGenerating report ...")
-    sections, df_diffs, df_missing, df_col_stats = generate_report(df_submitted, df_sftp, zip_path, diff_limit)
-    write_excel(sections, df_diffs, df_missing, zip_path, wb_path)
+    (
+        sections, df_diffs, df_missing, df_col_stats,
+        submitted_only_cols, sftp_only_cols, df_submitted_only_values,
+    ) = generate_report(df_submitted, df_sftp, zip_path, diff_limit)
+    write_excel(sections, df_diffs, df_missing, zip_path, wb_path, submitted_only_cols, sftp_only_cols,
+                df_submitted_only_values)
 
     col_stats_filename = f"column_stats_{timestamp}.csv"
     diff_details_filename = f"diff_details_{timestamp}.csv"
+    missing_products_filename = f"missing_products_{timestamp}.csv"
+    only_in_one_source_filename = f"only_in_one_source_{timestamp}.csv"
+
+    df_only_in_one_source = pd.DataFrame(
+        [{"column": c, "only_in": "Comestri export"} for c in submitted_only_cols]
+        + [{"column": c, "only_in": "SFTP"} for c in sftp_only_cols]
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
         df_col_stats.to_csv(tmp.name, index=False)
@@ -552,11 +634,21 @@ def main():
         df_diffs.to_csv(tmp.name, index=False)
         diff_details_tmp = tmp.name
 
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        df_missing.to_csv(tmp.name, index=False)
+        missing_products_tmp = tmp.name
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        df_only_in_one_source.to_csv(tmp.name, index=False)
+        only_in_one_source_tmp = tmp.name
+
     # Upload to SFTP
     uploads = [
         (wb_path, SFTP_REPORT_DIR, report_filename),
         (col_stats_tmp, SFTP_SHEET_DATA_DIR, col_stats_filename),
         (diff_details_tmp, SFTP_SHEET_DATA_DIR, diff_details_filename),
+        (missing_products_tmp, SFTP_SHEET_DATA_DIR, missing_products_filename),
+        (only_in_one_source_tmp, SFTP_SHEET_DATA_DIR, only_in_one_source_filename),
     ]
     print(f"\nUploading to SFTP ...")
     for local_path, remote_dir, filename in uploads:
@@ -574,6 +666,8 @@ def main():
 
     os.unlink(col_stats_tmp)
     os.unlink(diff_details_tmp)
+    os.unlink(missing_products_tmp)
+    os.unlink(only_in_one_source_tmp)
 
     # Print summary to terminal
     for sec in sections:
@@ -587,8 +681,12 @@ def main():
     print(f"  Tab 1: Report")
     print(f"  Tab 2: Diff Details ({len(df_diffs)} rows)")
     print(f"  Tab 3: Missing Products ({len(df_missing)} products)")
+    print(f"  Tab 4: Comestri-Only Values ({len(df_submitted_only_values)} rows)")
     print(f"Column stats   → {SFTP_SHEET_DATA_DIR}/{col_stats_filename} ({len(df_col_stats)} rows)")
     print(f"Diff details   → {SFTP_SHEET_DATA_DIR}/{diff_details_filename} ({len(df_diffs)} rows)")
+    print(f"Missing products → {SFTP_SHEET_DATA_DIR}/{missing_products_filename} ({len(df_missing)} rows)")
+    print(f"Columns only in one source → {SFTP_SHEET_DATA_DIR}/{only_in_one_source_filename} "
+          f"({len(df_only_in_one_source)} rows)")
 
 
 if __name__ == "__main__":
