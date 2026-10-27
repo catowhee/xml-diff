@@ -55,6 +55,22 @@ You will be prompted for:
 1. **Comestri export file path** — the `.zip` file to diff
 2. **Max differences per column** — caps rows in the Diff Details tab per column (press Enter for no limit)
 
+## Extracting a single product
+
+`extract_product.py` pulls one `<product>` node out of a catalogue XML so you can inspect it.
+
+```bash
+source .venv/bin/activate
+python extract_product.py
+```
+
+You will be prompted for:
+
+1. **XML or ZIP file path** — an `.xml` file, or a `.zip` (nested zips are searched too, e.g. a Comestri export)
+2. **Product ID** — matched against the `product-id` attribute
+
+The node is saved to `~/Downloads/product_{product_id}.xml` and the script prints which file it was found in. If the ID appears in more than one file, only the first match is written.
+
 ## Product levels
 
 Products are classified as follows:
@@ -71,3 +87,4 @@ Products are classified as follows:
 |------|----------|
 | `report_{timestamp}.xlsx` | `~/Downloads` |
 | `report_{timestamp}.xlsx` | `/incoming/diff_reports` on SFTP |
+| `product_{product_id}.xml` (from `extract_product.py`) | `~/Downloads` |
