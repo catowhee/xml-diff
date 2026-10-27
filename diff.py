@@ -360,6 +360,7 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
         merged = common.merge(sftp_common, on="product-id", suffixes=("_sub", "_sftp"))
 
         col_stat_rows = []
+        identical_rows = []
         for col in shared_cols:
             sub_col = f"{col}_sub"
             sftp_col = f"{col}_sftp"
@@ -369,6 +370,11 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
             same = int(eq.sum())
             diff = int((~eq).sum())
             if diff == 0:
+                identical_rows.append({
+                    "column": f"{level}.{col}",
+                    "same": same,
+                    "non_null": int(merged[sub_col].notna().sum()),
+                })
                 continue
             prefixed_col = f"{level}.{col}"
             col_stat_rows.append({
@@ -392,6 +398,7 @@ def generate_report(df_submitted, df_sftp, submitted_path, diff_limit):
         sections.append({
             "summary": summary,
             "col_stats": pd.DataFrame(col_stat_rows) if col_stat_rows else None,
+            "identical": identical_rows,
         })
 
     df_missing = df_submitted[df_submitted["product-id"].isin(missing_ids)][["product-id", "product-level"]].copy()
@@ -479,19 +486,30 @@ def write_excel(sections, df_diffs, df_missing, submitted_path, wb_path, submitt
 
         if sec["col_stats"] is None or sec["col_stats"].empty:
             ws.cell(row=row, column=1, value="No differences found or no common products.")
-            row += 2
-            continue
-
-        write_row(ws, row, ["Column", "Same", "Diff", "Diff%"],
-                  font=WHITE_FONT, fill=HEADER_FILL)
-        row += 1
-        for i, (_, r) in enumerate(sec["col_stats"].iterrows()):
-            fill = ALT_FILL if i % 2 == 0 else None
-            write_row(ws, row, [r["column"], r["same"], r["diff"], r["diff%"] / 100],
-                      fill=fill)
-            ws.cell(row=row, column=4).number_format = "0.0%"
             row += 1
+        else:
+            write_row(ws, row, ["Column", "Same", "Diff", "Diff%"],
+                      font=WHITE_FONT, fill=HEADER_FILL)
+            row += 1
+            for i, (_, r) in enumerate(sec["col_stats"].iterrows()):
+                fill = ALT_FILL if i % 2 == 0 else None
+                write_row(ws, row, [r["column"], r["same"], r["diff"], r["diff%"] / 100],
+                          fill=fill)
+                ws.cell(row=row, column=4).number_format = "0.0%"
+                row += 1
         row += 1
+
+        # Common columns that were compared and matched on every product
+        identical = sec.get("identical") or []
+        if identical:
+            write_row(ws, row, ["Compared, no differences", "Same", "Non-null"],
+                      font=WHITE_FONT, fill=HEADER_FILL)
+            row += 1
+            for i, r in enumerate(identical):
+                fill = ALT_FILL if i % 2 == 0 else None
+                write_row(ws, row, [r["column"], r["same"], r["non_null"]], fill=fill)
+                row += 1
+            row += 1
 
     # Columns only present in one source (never compared, so never show up above)
     ws.cell(row=row, column=1,
